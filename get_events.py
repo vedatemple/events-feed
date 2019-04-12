@@ -1,8 +1,9 @@
 #! python
 import facebook, os, pytz, socketserver
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ics import Calendar, Event
+from copy import deepcopy
 
 utc = pytz.UTC
 
@@ -25,43 +26,74 @@ class facebook_events_to_ical:
         except:
             return default_value
 
-    def get_ical(self):
+    def explode_event(self, event):
+        try:
+            DATETIME_FORMAT = '%Y-%m-%dT%H:%M:%S%z'
+            for event_time in event['event_times']:
+                start_time = datetime.strptime(
+                    event_time['start_time'],
+                    DATETIME_FORMAT,
+                )
+                end_time = datetime.strptime(
+                    event_time['end_time'],
+                    DATETIME_FORMAT,
+                )
 
+                now = datetime.utcnow().replace(tzinfo=timezone.utc)
+                if start_time >= now:
+                    this_event = deepcopy(event)
+                    del this_event['event_times']
+                    this_event.update(event_time)
+                    yield this_event
+
+            yield event
+
+        # Yield single event
+        except KeyError:
+            yield event
+
+    def get_facebook_events(self):
         graph = facebook.GraphAPI(access_token=access_token, version="2.12")
         events = graph.request('/v3.2/%s/events' % self.facebook_page_name)
         eventList = events['data']
+        return eventList
 
-        # print ("Returned %d events" % len(eventList))
-        # print (eventList)
+    def get_facebook_events_exploded(self, eventList):
+        for event in eventList:
+            yield from self.explode_event(event)
+
+    def get_filtered_events(self, eventList):
+        for e in eventList:
+            DATETIME_FORMAT = '%Y-%m-%dT%H:%M:%S%z'
+            now = datetime.utcnow().replace(tzinfo=timezone.utc)
+            start_time = datetime.strptime(
+                        e['start_time'],
+                        DATETIME_FORMAT,
+                    )
+            if start_time >= now:
+                yield e
+
+    def get_ical_event(self, e):
+        ical_event = Event()
+        ical_event.name = self.get_facebook_event_property(e, 'name', '[Some Event]')
+        ical_event.begin = self.get_facebook_event_property(e, 'start_time', '')
+        ical_event.end = self.get_facebook_event_property(e, 'end_time', '')
+        ical_event.uid = self.get_facebook_event_property(e, 'id', '')
+        ical_event.url = 'https://www.facebook.com/events/%s' % self.get_facebook_event_property(e, 'id', '')
+        ical_event.description = '%s\n\n%s' % (ical_event.url, self.get_facebook_event_property(e, 'description', ''))
+        return ical_event
+
+    def get_ical_calendar(self):
+        eventList = self.get_facebook_events()
+        events_exploded = self.get_facebook_events_exploded(eventList)
+        events_filtered = self.get_filtered_events(events_exploded)
 
         ical = Calendar()
-
-        for e in eventList:
-            start_time = datetime.strptime(e['start_time'], "%Y-%m-%dT%H:%M:%S%z" )
-
-            try:
-                if start_time <= utc.localize((datetime.now() - timedelta(days=1))):
-                    pass
-                else:
-                    end_time = datetime.strptime(e['end_time'], "%Y-%m-%dT%H:%M:%S%z" )
-
-                    ical_event = Event()
-                    ical_event.name = self.get_facebook_event_property(e, 'name', '[Some Event]')
-                    ical_event.begin = start_time
-                    ical_event.end = end_time
-                    ical_event.uid = self.get_facebook_event_property(e, 'id', '')
-                    ical_event.url = 'https://www.facebook.com/events/%s' % self.get_facebook_event_property(e, 'id', '')
-                    ical_event.description = '%s\n\n%s' % (ical_event.url, self.get_facebook_event_property(e, 'description', ''))
-
-                    # print (ical_event)
-
-                    ical.events.add(ical_event)
-            except:
-                raise
-                # pass
+        for e in events_filtered:
+            ical_event = self.get_ical_event(e)
+            ical.events.add(ical_event)
 
         return ical
-
 
 class iCalServer_RequestHandler(BaseHTTPRequestHandler):
   def do_GET(self):
@@ -70,14 +102,13 @@ class iCalServer_RequestHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type','text/calendar')
         self.end_headers()
  
-        ical = facebook_events_to_ical('vedatemple').get_ical()
+        ical = facebook_events_to_ical('vedatemple').get_ical_calendar()
         self.wfile.write(bytes(str(ical), "utf8"))
         return
 
-# ical = facebook_events_to_ical('vedatemple').get_ical()
+# ical = facebook_events_to_ical('vedatemple').get_ical_calendar()
 # print (ical)
 
 PORT = 8080
 with socketserver.TCPServer(("", PORT), iCalServer_RequestHandler) as httpd:
-    # print("serving at port", PORT)
     httpd.serve_forever()
