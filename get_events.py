@@ -67,7 +67,7 @@ class facebook_events_to_ical:
         path = '%s/events' % self.facebook_page_name
         params = urllib.parse.urlencode(args)
 
-        print('GET /%s?%s', path, params)
+        # print('GET /%s?%s', path, params)
 
         events = graph.get_object(path, **args)
         eventList = events['data']
