@@ -1,5 +1,5 @@
 #! python
-import facebook, os, pytz, socketserver
+import facebook, os, pytz, socketserver, urllib
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from ics import Calendar, Event
@@ -16,6 +16,11 @@ class facebook_events_to_ical:
 
     def __init__ (self, facebook_page_name):
         self.facebook_page_name = facebook_page_name
+        self.page_number = 0
+        self.max_pages = 5
+
+        self.filter_begin = datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(days=-3)
+        self.filter_end = datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(days=60)
 
     def format_date(self, dt):
         return dt.strftime('%b %d %Y @ %H:%M')
@@ -52,11 +57,29 @@ class facebook_events_to_ical:
         except KeyError:
             yield event
 
-    def get_facebook_events(self):
+    def get_facebook_events(self, **args):
+        self.page_number = self.page_number + 1
+        if self.page_number >= self.max_pages:
+            return
+
         graph = facebook.GraphAPI(access_token=access_token, version="2.12")
-        events = graph.request('/v3.2/%s/events' % self.facebook_page_name)
+
+        path = '%s/events' % self.facebook_page_name
+        params = urllib.parse.urlencode(args)
+
+        print('GET /%s?%s', path, params)
+
+        events = graph.get_object(path, **args)
         eventList = events['data']
-        return eventList
+
+        for e in eventList:
+            yield e
+
+        try:
+            args.update(after=events['paging']['cursors']['after'])
+            yield from self.get_facebook_events(**args)
+        except KeyError:
+            pass
 
     def get_facebook_events_exploded(self, eventList):
         for event in eventList:
@@ -70,7 +93,7 @@ class facebook_events_to_ical:
                         e['start_time'],
                         DATETIME_FORMAT,
                     )
-            if start_time >= now:
+            if start_time >= self.filter_begin and start_time <= self.filter_end:
                 yield e
 
     def get_ical_event(self, e):
@@ -106,9 +129,10 @@ class iCalServer_RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(bytes(str(ical), "utf8"))
         return
 
-# ical = facebook_events_to_ical('vedatemple').get_ical_calendar()
-# print (ical)
-
-PORT = 8080
-with socketserver.TCPServer(("", PORT), iCalServer_RequestHandler) as httpd:
-    httpd.serve_forever()
+if os.environ.get('dev'):
+    ical = facebook_events_to_ical('vedatemple').get_ical_calendar()
+    print (ical)
+else:
+    PORT = 8080
+    with socketserver.TCPServer(("", PORT), iCalServer_RequestHandler) as httpd:
+        httpd.serve_forever()
